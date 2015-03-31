@@ -22,6 +22,8 @@ import Prelude hiding (init)
 
 data Status = Continue | Stop
 
+data EndStep = EndStep deriving Show
+
 main :: IO ()
 main = do
     init $ SDL_INIT_VIDEO .|. SDL_INIT_TIMER
@@ -29,9 +31,11 @@ main = do
     let (w, r) = either error id res
 
     sem <- newEmptyMVar
+    chan <- newChan
     forkIO $ renderLoop sem r
+    forkIO . forever $ print =<< readChan chan
 
-    mainLoop 60 sem
+    mainLoop 60 sem 60 chan
 
     putMVar sem Stop
 
@@ -39,11 +43,13 @@ main = do
     quit
 
 
-mainLoop :: Word32 -> MVar Status -> IO ()
-mainLoop frameRate sem = do
-    let intervals = intervalPoints frameRate
+mainLoop :: Word32 -> MVar Status -> Word32 -> Chan (Either EndStep Event)
+         -> IO ()
+mainLoop frameRate sem simRate chan = do
+    let frames = intervalPoints frameRate
+        sims = intervalPoints simRate
     evtP <- malloc
-    flip fix intervals $ \wait all@(next:rest) -> do
+    flip fix (frames, sims) $ \wait (f:fs, s:ss) -> do
         fix $ \moreEvents -> do
             stat <- pollEvent evtP
             case stat of
@@ -51,16 +57,21 @@ mainLoop frameRate sem = do
                     evt <- peek evtP
                     case evt of
                         QuitEvent _ _ -> return ()
-                        _             -> moreEvents
+                        _             -> do
+                            writeChan chan $ Right evt
+                            moreEvents
                 0 -> do
                     t <- getTicks
-                    case t >= next of
-                        True -> do
+                    case (t >= s, t>= f) of
+                        (True, _) -> do
+                            writeChan chan $ Left EndStep
+                            wait (f:fs, ss)
+                        (_, True) -> do
                             tryPutMVar sem Continue
-                            wait rest
-                        False -> do
+                            wait (fs, s:ss)
+                        _ -> do
                             threadDelay 100
-                            wait all
+                            wait (f:fs, s:ss)
 
 
 renderLoop :: MVar Status -> Renderer -> IO ()
@@ -77,8 +88,8 @@ renderLoop sem r = fix $ \loop -> do
         Stop -> return ()
 
 
-windowAndRenderer :: String -> CInt -> CInt -> Word32 -> Word32 ->
-                     IO (Either String (Window, Renderer))
+windowAndRenderer :: String -> CInt -> CInt -> Word32 -> Word32
+                  -> IO (Either String (Window, Renderer))
 windowAndRenderer title width height wFlags rFlags =
     withCString title $ \name -> runEitherT $ do
         w <- nullCheck $ createWindow
