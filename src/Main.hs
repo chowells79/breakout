@@ -44,8 +44,8 @@ mainLoop :: Word32
          -> Chan (Either SimStep Event)
          -> IO ()
 mainLoop frameRate surface simRate events = alloca $ \evtP -> do
-    res <- windowAndRenderer "Breakout" 640 480 0 0
-    let (w, r) = either error id res
+    res <- window "Breakout" 640 480 0
+    let w = either error id res
 
     let frames = intervalPoints frameRate
         sims = intervalPoints simRate
@@ -69,26 +69,22 @@ mainLoop frameRate surface simRate events = alloca $ \evtP -> do
                             writeChan events . Left . EndStep $ t
                             wait (f:fs, ss)
                         (True, _) -> do
-                            renderSurface r surface
+                            renderSurface w surface
                             wait (dropWhile (<= t) fs, s:ss)
                         _ -> do
                             threadDelay 100
                             wait (f:fs, s:ss)
 
-    destroyRenderer r
     destroyWindow w
 
 
-renderSurface :: Renderer -> MVar (Ptr Surface) -> IO ()
-renderSurface r surface = do
+renderSurface :: Window -> MVar (Ptr Surface) -> IO ()
+renderSurface w surface = do
     t1 <- getTicks
-    setRenderDrawColor r 0 0 0 0
-    renderClear r
     withMVar surface $ \surP -> do
-        t <- createTextureFromSurface r surP
-        renderCopy r t nullPtr nullPtr
-        destroyTexture t
-    renderPresent r
+        dest <- getWindowSurface w
+        blitSurface surP nullPtr dest nullPtr
+        updateWindowSurface w
     t2 <- getTicks
     print ("render", t2 - t1)
 
@@ -125,19 +121,16 @@ gameLoop events surface done = do
     putMVar done ()
 
 
-windowAndRenderer :: String -> CInt -> CInt -> Word32 -> Word32
-                  -> IO (Either String (Window, Renderer))
-windowAndRenderer title width height wFlags rFlags =
+window :: String -> CInt -> CInt -> Word32 -> IO (Either String Window)
+window title width height wFlags =
     withCString title $ \name -> runEitherT $ do
-        w <- nullCheck $ createWindow
-                         name
-                         SDL_WINDOWPOS_CENTERED
-                         SDL_WINDOWPOS_CENTERED
-                         width
-                         height
-                         wFlags
-        r <- nullCheck $ createRenderer w (-1) rFlags
-        return (w, r)
+        nullCheck $ createWindow
+                    name
+                    SDL_WINDOWPOS_CENTERED
+                    SDL_WINDOWPOS_CENTERED
+                    width
+                    height
+                    wFlags
 
 
 nullCheck :: IO (Ptr a) -> EitherT String IO (Ptr a)
