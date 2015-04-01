@@ -84,7 +84,7 @@ renderSurface w surface = do
     withMVar surface $ \surP -> do
         dest <- getWindowSurface w
         blitSurface surP nullPtr dest nullPtr
-        updateWindowSurface w
+    updateWindowSurface w
     t2 <- getTicks
     print ("render", t2 - t1)
 
@@ -108,11 +108,11 @@ gameLoop events surface done = do
             Left Shutdown    -> putStrLn "shutting down game loop"
             Left (EndStep t) -> do
                 t1 <- getTicks
-                old <- takeMVar surface
-                freeSurface old
                 new <- create
                 fillRect new nullPtr (t * 256 + 255)
+                old <- takeMVar surface
                 putMVar surface new
+                freeSurface old
                 t2 <- getTicks
                 print ("draw", t2 - t1)
                 loop
