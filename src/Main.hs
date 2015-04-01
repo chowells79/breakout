@@ -69,7 +69,7 @@ mainLoop frameRate surface simRate events = alloca $ \evtP -> do
                             writeChan events . Left . EndStep $ t
                             wait (f:fs, ss)
                         (True, _) -> do
-                            withMVar surface $ renderSurface r
+                            renderSurface r surface
                             wait (dropWhile (<= t) fs, s:ss)
                         _ -> do
                             threadDelay 100
@@ -79,17 +79,18 @@ mainLoop frameRate surface simRate events = alloca $ \evtP -> do
     destroyWindow w
 
 
-renderSurface :: Renderer -> Ptr Surface -> IO ()
-renderSurface r surP = do
+renderSurface :: Renderer -> MVar (Ptr Surface) -> IO ()
+renderSurface r surface = do
     t1 <- getTicks
     setRenderDrawColor r 0 0 0 0
     renderClear r
-    t <- createTextureFromSurface r surP
-    renderCopy r t nullPtr nullPtr
-    destroyTexture t
+    withMVar surface $ \surP -> do
+        t <- createTextureFromSurface r surP
+        renderCopy r t nullPtr nullPtr
+        destroyTexture t
     renderPresent r
     t2 <- getTicks
-    print $ t2 - t1
+    print ("render", t2 - t1)
 
 
 gameLoop :: Chan (Either SimStep Event)
@@ -110,29 +111,18 @@ gameLoop events surface done = do
         case e of
             Left Shutdown    -> putStrLn "shutting down game loop"
             Left (EndStep t) -> do
+                t1 <- getTicks
                 old <- takeMVar surface
                 freeSurface old
                 new <- create
                 fillRect new nullPtr (t * 256 + 255)
                 putMVar surface new
+                t2 <- getTicks
+                print ("draw", t2 - t1)
                 loop
             _                -> loop
 
     putMVar done ()
-
-
--- renderLoop :: MVar Status -> Renderer -> IO ()
--- renderLoop sem r = fix $ \loop -> do
---     t <- getTicks
---     let c = floor (128 - 128 * cos (fromIntegral t / 1000))
---     setRenderDrawColor r c c c c
---     renderClear r
---     renderPresent r
-
---     stat <- takeMVar sem
---     case stat of
---         Continue -> loop
---         Stop -> return ()
 
 
 windowAndRenderer :: String -> CInt -> CInt -> Word32 -> Word32
