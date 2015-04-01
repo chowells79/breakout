@@ -20,35 +20,35 @@ import Debug.Trace
 
 import Prelude hiding (init)
 
-data Status = Continue | Stop
-
-data EndStep = EndStep deriving Show
+data SimStep = EndStep Word32 | Shutdown deriving Show
 
 main :: IO ()
 main = do
     init $ SDL_INIT_VIDEO .|. SDL_INIT_TIMER
-    res <- windowAndRenderer "Game" 640 480 0 0
-    let (w, r) = either error id res
 
-    sem <- newEmptyMVar
-    chan <- newChan
-    forkIO $ renderLoop sem r
-    forkIO . forever $ print =<< readChan chan
+    surface <- newEmptyMVar
+    events <- newChan
+    gameLoopDone <- newEmptyMVar
 
-    mainLoop 60 sem 60 chan
+    forkIO $ gameLoop events surface gameLoopDone
+    mainLoop 60 surface 60 events
 
-    putMVar sem Stop
+    takeMVar gameLoopDone
 
-    destroyWindow w
     quit
 
 
-mainLoop :: Word32 -> MVar Status -> Word32 -> Chan (Either EndStep Event)
+mainLoop :: Word32
+         -> MVar (Ptr Surface)
+         -> Word32
+         -> Chan (Either SimStep Event)
          -> IO ()
-mainLoop frameRate sem simRate chan = do
+mainLoop frameRate surface simRate events = alloca $ \evtP -> do
+    res <- windowAndRenderer "Breakout" 640 480 0 0
+    let (w, r) = either error id res
+
     let frames = intervalPoints frameRate
         sims = intervalPoints simRate
-    evtP <- malloc
     flip fix (frames, sims) $ \wait (f:fs, s:ss) -> do
         fix $ \moreEvents -> do
             stat <- pollEvent evtP
@@ -56,36 +56,83 @@ mainLoop frameRate sem simRate chan = do
                 1 -> do
                     evt <- peek evtP
                     case evt of
-                        QuitEvent _ _ -> return ()
+                        QuitEvent _ _ -> do
+                            writeChan events $ Left Shutdown
+                            return ()
                         _             -> do
-                            writeChan chan $ Right evt
+                            writeChan events $ Right evt
                             moreEvents
                 0 -> do
                     t <- getTicks
-                    case (t >= s, t>= f) of
-                        (True, _) -> do
-                            writeChan chan $ Left EndStep
-                            wait (f:fs, ss)
+                    case (t >= f, t>= s) of
                         (_, True) -> do
-                            tryPutMVar sem Continue
-                            wait (fs, s:ss)
+                            writeChan events . Left . EndStep $ t
+                            wait (f:fs, ss)
+                        (True, _) -> do
+                            withMVar surface $ renderSurface r
+                            wait (dropWhile (<= t) fs, s:ss)
                         _ -> do
                             threadDelay 100
                             wait (f:fs, s:ss)
 
+    destroyRenderer r
+    destroyWindow w
 
-renderLoop :: MVar Status -> Renderer -> IO ()
-renderLoop sem r = fix $ \loop -> do
-    t <- getTicks
-    let c = floor (128 - 128 * cos (fromIntegral t / 1000))
-    setRenderDrawColor r c c c c
+
+renderSurface :: Renderer -> Ptr Surface -> IO ()
+renderSurface r surP = do
+    t1 <- getTicks
+    setRenderDrawColor r 0 0 0 0
     renderClear r
+    t <- createTextureFromSurface r surP
+    renderCopy r t nullPtr nullPtr
+    destroyTexture t
     renderPresent r
+    t2 <- getTicks
+    print $ t2 - t1
 
-    stat <- takeMVar sem
-    case stat of
-        Continue -> loop
-        Stop -> return ()
+
+gameLoop :: Chan (Either SimStep Event)
+         -> MVar (Ptr Surface)
+         -> MVar ()
+         -> IO ()
+gameLoop events surface done = do
+    let create = createRGBSurface 0 640 480 32 0xFF000000
+                                               0x00FF0000
+                                               0x0000FF00
+                                               0x000000FF
+    surP <- create
+    fillRect surP nullPtr 0
+    putMVar surface surP
+
+    fix $ \loop -> do
+        e <- readChan events
+        case e of
+            Left Shutdown    -> putStrLn "shutting down game loop"
+            Left (EndStep t) -> do
+                old <- takeMVar surface
+                freeSurface old
+                new <- create
+                fillRect new nullPtr (t * 256 + 255)
+                putMVar surface new
+                loop
+            _                -> loop
+
+    putMVar done ()
+
+
+-- renderLoop :: MVar Status -> Renderer -> IO ()
+-- renderLoop sem r = fix $ \loop -> do
+--     t <- getTicks
+--     let c = floor (128 - 128 * cos (fromIntegral t / 1000))
+--     setRenderDrawColor r c c c c
+--     renderClear r
+--     renderPresent r
+
+--     stat <- takeMVar sem
+--     case stat of
+--         Continue -> loop
+--         Stop -> return ()
 
 
 windowAndRenderer :: String -> CInt -> CInt -> Word32 -> Word32
