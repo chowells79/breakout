@@ -18,6 +18,8 @@ import Control.Concurrent
 
 import Debug.Trace
 
+import System.Mem
+
 import Prelude hiding (init)
 
 data SimStep = EndStep Word32 | Shutdown deriving Show
@@ -30,25 +32,31 @@ main = do
     events <- newChan
     gameLoopDone <- newEmptyMVar
 
-    forkIO $ gameLoop events surface gameLoopDone
-    mainLoop 60 surface 60 events
+    res <- window "Breakout" 640 480 0
+    let w = either error id res
 
+    pixelFmt <- peek . surfaceFormat =<< peek =<< getWindowSurface w
+
+    forkIO $ gameLoop events surface gameLoopDone pixelFmt
+    mainLoop w 60 surface 60 events
+
+    destroyWindow w
     takeMVar gameLoopDone
 
     quit
 
 
-mainLoop :: Word32
+mainLoop :: Window
+         -> Word32
          -> MVar (Ptr Surface)
          -> Word32
          -> Chan (Either SimStep Event)
          -> IO ()
-mainLoop frameRate surface simRate events = alloca $ \evtP -> do
-    res <- window "Breakout" 640 480 0
-    let w = either error id res
-
+mainLoop w frameRate surface simRate events = alloca $ \evtP -> do
     let frames = intervalPoints frameRate
         sims = intervalPoints simRate
+    dest <- getWindowSurface w
+
     flip fix (frames, sims) $ \wait (f:fs, s:ss) -> do
         fix $ \moreEvents -> do
             stat <- pollEvent evtP
@@ -69,35 +77,39 @@ mainLoop frameRate surface simRate events = alloca $ \evtP -> do
                             writeChan events . Left . EndStep $ t
                             wait (f:fs, ss)
                         (True, _) -> do
-                            renderSurface w surface
+                            renderSurface dest w surface
                             wait (dropWhile (<= t) fs, s:ss)
                         _ -> do
                             threadDelay 100
+                            performMajorGC
                             wait (f:fs, s:ss)
 
-    destroyWindow w
 
-
-renderSurface :: Window -> MVar (Ptr Surface) -> IO ()
-renderSurface w surface = do
+renderSurface :: Ptr Surface -> Window -> MVar (Ptr Surface) -> IO ()
+renderSurface dest w surface = do
     t1 <- getTicks
     withMVar surface $ \surP -> do
-        dest <- getWindowSurface w
         blitSurface surP nullPtr dest nullPtr
-    updateWindowSurface w
     t2 <- getTicks
-    print ("render", t2 - t1)
+    updateWindowSurface w
+    t3 <- getTicks
+    print ("render", t2 - t1, t3 - t2)
 
 
 gameLoop :: Chan (Either SimStep Event)
          -> MVar (Ptr Surface)
          -> MVar ()
+         -> PixelFormat
          -> IO ()
-gameLoop events surface done = do
-    let create = createRGBSurface 0 640 480 32 0xFF000000
-                                               0x00FF0000
-                                               0x0000FF00
-                                               0x000000FF
+gameLoop events surface done fmt = do
+    let create = createRGBSurface 0
+                                  640
+                                  480
+                                  (fromIntegral $ pixelFormatBitsPerPixel fmt)
+                                  (pixelFormatRMask fmt)
+                                  (pixelFormatGMask fmt)
+                                  (pixelFormatBMask fmt)
+                                  (pixelFormatAMask fmt)
     surP <- create
     fillRect surP nullPtr 0
     putMVar surface surP
@@ -109,7 +121,8 @@ gameLoop events surface done = do
             Left (EndStep t) -> do
                 t1 <- getTicks
                 new <- create
-                fillRect new nullPtr (t * 256 + 255)
+                fillRect new nullPtr t
+                setSurfaceBlendMode new SDL_BLENDMODE_NONE
                 old <- takeMVar surface
                 putMVar surface new
                 freeSurface old
